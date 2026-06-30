@@ -22,6 +22,12 @@ const SOURCE_META = {
 
 const trackCache = new Map();
 const qqMetaCache = new Map();
+const neteaseLoginSession = {
+  cookie: '',
+  profile: null,
+  account: null,
+  updatedAt: 0,
+};
 
 const MIME = {
   '.html': 'text/html; charset=utf-8',
@@ -110,6 +116,62 @@ async function fetchText(targetUrl, opts = {}) {
 async function fetchJson(targetUrl, opts = {}) {
   const text = await fetchText(targetUrl, { ...opts, accept: 'application/json,text/plain,*/*' });
   return jsonFromPossiblyWrappedText(text);
+}
+
+async function fetchJsonWithMeta(targetUrl, opts = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), opts.timeoutMs || REQUEST_TIMEOUT_MS);
+  try {
+    const response = await fetch(targetUrl, {
+      method: opts.method || 'GET',
+      headers: {
+        'User-Agent': UA,
+        Accept: opts.accept || 'application/json,text/plain,*/*',
+        ...(opts.headers || {}),
+      },
+      body: opts.body,
+      redirect: 'follow',
+      signal: controller.signal,
+    });
+    const text = await response.text();
+    if (!response.ok) {
+      const err = new Error(`HTTP ${response.status} from ${targetUrl}`);
+      err.status = response.status;
+      err.body = text.slice(0, 600);
+      throw err;
+    }
+    return { json: jsonFromPossiblyWrappedText(text || '{}'), text, headers: response.headers };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+function splitSetCookieHeader(raw) {
+  if (!raw) return [];
+  return String(raw).split(/,(?=\s*[^;,\s]+=)/).map(item => item.trim()).filter(Boolean);
+}
+
+function mergeCookieHeader(existing, setCookieRaw) {
+  const jar = new Map();
+  String(existing || '').split(';').forEach(part => {
+    const index = part.indexOf('=');
+    if (index > 0) jar.set(part.slice(0, index).trim(), part.slice(index + 1).trim());
+  });
+  splitSetCookieHeader(setCookieRaw).forEach(cookie => {
+    const first = cookie.split(';')[0] || '';
+    const index = first.indexOf('=');
+    if (index > 0) jar.set(first.slice(0, index).trim(), first.slice(index + 1).trim());
+  });
+  return Array.from(jar.entries()).map(([key, value]) => `${key}=${value}`).join('; ');
+}
+
+async function readJsonBody(req) {
+  const chunks = [];
+  for await (const chunk of req) chunks.push(chunk);
+  if (!chunks.length) return {};
+  const text = Buffer.concat(chunks).toString('utf8').trim();
+  if (!text) return {};
+  return JSON.parse(text);
 }
 
 function pickQueryParam(rawUrl, key) {
@@ -338,6 +400,102 @@ async function searchNetease(keyword, limit) {
       ...quality,
     });
   });
+}
+
+function neteaseHeaders(extra = {}) {
+  return {
+    Referer: 'https://music.163.com/',
+    Origin: 'https://music.163.com',
+    Cookie: [
+      'os=pc',
+      'appver=2.9.7',
+      neteaseLoginSession.cookie,
+    ].filter(Boolean).join('; '),
+    ...extra,
+  };
+}
+
+function neteaseLoginPayload(extra = {}) {
+  const profile = neteaseLoginSession.profile || {};
+  const account = neteaseLoginSession.account || {};
+  const vipType = Number(profile.vipType || account.vipType || 0) || 0;
+  const userId = profile.userId || account.id || account.userId || '';
+  return {
+    provider: 'netease',
+    loggedIn: !!neteaseLoginSession.cookie,
+    hasCookie: !!neteaseLoginSession.cookie,
+    userId,
+    nickname: profile.nickname || (userId ? `网易云用户 ${userId}` : ''),
+    avatar: profile.avatarUrl || '',
+    vipType,
+    vipLevel: vipType > 10 ? 'svip' : (vipType > 0 ? 'vip' : 'none'),
+    isVip: vipType > 0,
+    isSvip: vipType > 10,
+    updatedAt: neteaseLoginSession.updatedAt || 0,
+    ...extra,
+  };
+}
+
+async function refreshNeteaseProfile() {
+  if (!neteaseLoginSession.cookie) return neteaseLoginPayload();
+  try {
+    const { json, headers } = await fetchJsonWithMeta('https://music.163.com/api/nuser/account/get', {
+      headers: neteaseHeaders(),
+      timeoutMs: 8000,
+    });
+    const nextCookie = headers.get('set-cookie');
+    if (nextCookie) neteaseLoginSession.cookie = mergeCookieHeader(neteaseLoginSession.cookie, nextCookie);
+    if (json && json.code === 200) {
+      neteaseLoginSession.profile = json.profile || neteaseLoginSession.profile;
+      neteaseLoginSession.account = json.account || neteaseLoginSession.account;
+      neteaseLoginSession.updatedAt = Date.now();
+    }
+  } catch (e) {
+    // Keep the saved cookie; the next status check can try again.
+  }
+  return neteaseLoginPayload();
+}
+
+async function createNeteaseQrKey() {
+  const api = `https://music.163.com/api/login/qrcode/unikey?type=1&timestamp=${Date.now()}`;
+  const { json, headers } = await fetchJsonWithMeta(api, {
+    headers: neteaseHeaders(),
+    timeoutMs: 8000,
+  });
+  const nextCookie = headers.get('set-cookie');
+  if (nextCookie) neteaseLoginSession.cookie = mergeCookieHeader(neteaseLoginSession.cookie, nextCookie);
+  const key = json && (json.unikey || (json.data && json.data.unikey) || json.key);
+  if (!key) throw new Error((json && (json.message || json.msg)) || '获取 key 失败');
+  return { ok: true, code: 200, key, unikey: key };
+}
+
+function createNeteaseQrImage(key) {
+  const loginUrl = `https://music.163.com/login?codekey=${encodeURIComponent(key)}`;
+  const img = `https://api.qrserver.com/v1/create-qr-code/?size=240x240&margin=1&data=${encodeURIComponent(loginUrl)}`;
+  return { ok: true, code: 200, key, qrurl: loginUrl, url: loginUrl, img };
+}
+
+async function checkNeteaseQrLogin(key) {
+  const api = `https://music.163.com/api/login/qrcode/client/login?key=${encodeURIComponent(key)}&type=1&timestamp=${Date.now()}`;
+  const { json, headers } = await fetchJsonWithMeta(api, {
+    headers: neteaseHeaders(),
+    timeoutMs: 8000,
+  });
+  const nextCookie = headers.get('set-cookie');
+  if (nextCookie) neteaseLoginSession.cookie = mergeCookieHeader(neteaseLoginSession.cookie, nextCookie);
+  if (json && json.code === 803) {
+    await refreshNeteaseProfile();
+    return { ...json, ...neteaseLoginPayload({ code: 803 }) };
+  }
+  return { loggedIn: false, ...(json || {}) };
+}
+
+async function loginNeteaseWithCookie(cookie) {
+  neteaseLoginSession.cookie = mergeCookieHeader('', cookie);
+  neteaseLoginSession.profile = null;
+  neteaseLoginSession.account = null;
+  neteaseLoginSession.updatedAt = Date.now();
+  return refreshNeteaseProfile();
 }
 
 async function searchQQ(keyword, limit) {
@@ -895,7 +1053,7 @@ async function routeApi(req, res, url) {
   }
 
   if (pathname === '/api/login/status') {
-    sendJson(res, { loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false });
+    sendJson(res, await refreshNeteaseProfile());
     return;
   }
 
@@ -904,20 +1062,65 @@ async function routeApi(req, res, url) {
     return;
   }
 
-  if (pathname === '/api/logout' || pathname === '/api/qq/logout') {
+  if (pathname === '/api/logout') {
+    neteaseLoginSession.cookie = '';
+    neteaseLoginSession.profile = null;
+    neteaseLoginSession.account = null;
+    neteaseLoginSession.updatedAt = Date.now();
     sendJson(res, { ok: true, loggedIn: false });
     return;
   }
 
-  if (pathname === '/api/login/qr/key' || pathname === '/api/login/qr/create' || pathname === '/api/login/qr/check') {
-    sendJson(res, { loggedIn: false, code: 800, message: 'Login is disabled in the MusicSquare source build.' });
+  if (pathname === '/api/qq/logout') {
+    sendJson(res, { ok: true, loggedIn: false });
+    return;
+  }
+
+  if (pathname === '/api/login/qr/key') {
+    sendJson(res, await createNeteaseQrKey());
+    return;
+  }
+
+  if (pathname === '/api/login/qr/create') {
+    const key = url.searchParams.get('key') || '';
+    if (!key) {
+      sendError(res, 400, 'Missing QR key');
+      return;
+    }
+    sendJson(res, createNeteaseQrImage(key));
+    return;
+  }
+
+  if (pathname === '/api/login/qr/check') {
+    const key = url.searchParams.get('key') || '';
+    if (!key) {
+      sendError(res, 400, 'Missing QR key');
+      return;
+    }
+    sendJson(res, await checkNeteaseQrLogin(key));
+    return;
+  }
+
+  if (pathname === '/api/login/cookie' && req.method === 'POST') {
+    const body = await readJsonBody(req);
+    const cookie = body.cookie || body.Cookie || '';
+    if (!cookie) {
+      sendError(res, 400, 'Missing cookie');
+      return;
+    }
+    sendJson(res, await loginNeteaseWithCookie(cookie));
     return;
   }
 
   if (pathname === '/api/discover/home') {
+    const login = neteaseLoginPayload();
     sendJson(res, {
-      loggedIn: false,
-      user: null,
+      loggedIn: login.loggedIn,
+      user: login.loggedIn ? {
+        userId: login.userId,
+        nickname: login.nickname,
+        avatar: login.avatar,
+      } : null,
       dailySongs: [],
       playlists: [],
       podcasts: [],
@@ -928,7 +1131,9 @@ async function routeApi(req, res, url) {
   }
 
   if (pathname === '/api/user/playlists' || pathname === '/api/qq/user/playlists') {
-    sendJson(res, { loggedIn: false, provider: pathname.includes('/qq/') ? 'qq' : 'netease', playlists: [] });
+    const provider = pathname.includes('/qq/') ? 'qq' : 'netease';
+    const login = provider === 'netease' ? neteaseLoginPayload() : { loggedIn: false };
+    sendJson(res, { loggedIn: !!login.loggedIn, provider, playlists: [] });
     return;
   }
 
