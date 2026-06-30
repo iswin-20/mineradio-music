@@ -2713,7 +2713,8 @@ var lyricsLines = [], lyricsVisible = false, lyricsHasNativeKaraoke = false, lyr
 var playlist = [], playQueue = [], currentIdx = -1, playing = false, playToggleBusy = false;
 var searchMode = 'song', podcastResults = [], podcastPrograms = [], podcastCurrentRadio = null;
 var searchSources = { netease: true, qq: true, kuwo: true, joox: true };
-var LOGIN_DISABLED = true;
+var LOGIN_DISABLED = false;
+var AUTO_LOGIN_GUIDE_DISABLED = true;
 var loginStatus = { loggedIn: false, vipType: 0, vipLevel: 'none', isVip: false, isSvip: false, vipLabel: '无VIP' };
 var qqLoginStatus = { provider: 'qq', loggedIn: false, preview: false, nickname: 'QQ 音乐', userId: '', avatar: '', vipType: 0 };
 var qqLoginAutoRefreshTimer = null;
@@ -24043,6 +24044,7 @@ function runLoginGuideParticles(done) {
 }
 function maybeRunStartupLoginGuide(source) {
   if (LOGIN_DISABLED) return;
+  if (AUTO_LOGIN_GUIDE_DISABLED) return;
   if (startupLoginGuideShown || loginGuideAnimating) return;
   if (visualGuideActive) return;
   if (document.body.classList.contains('splash-active')) return;
