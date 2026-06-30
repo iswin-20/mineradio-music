@@ -165,6 +165,14 @@ function mergeCookieHeader(existing, setCookieRaw) {
   return Array.from(jar.entries()).map(([key, value]) => `${key}=${value}`).join('; ');
 }
 
+function hasCookieName(cookie, name) {
+  const target = String(name || '').toLowerCase();
+  return String(cookie || '').split(';').some(part => {
+    const index = part.indexOf('=');
+    return index > 0 && part.slice(0, index).trim().toLowerCase() === target;
+  });
+}
+
 async function readJsonBody(req) {
   const chunks = [];
   for await (const chunk of req) chunks.push(chunk);
@@ -420,10 +428,11 @@ function neteaseLoginPayload(extra = {}) {
   const account = neteaseLoginSession.account || {};
   const vipType = Number(profile.vipType || account.vipType || 0) || 0;
   const userId = profile.userId || account.id || account.userId || '';
+  const loggedIn = hasCookieName(neteaseLoginSession.cookie, 'MUSIC_U');
   return {
     provider: 'netease',
-    loggedIn: !!neteaseLoginSession.cookie,
-    hasCookie: !!neteaseLoginSession.cookie,
+    loggedIn,
+    hasCookie: loggedIn,
     userId,
     nickname: profile.nickname || (userId ? `网易云用户 ${userId}` : ''),
     avatar: profile.avatarUrl || '',
@@ -437,7 +446,7 @@ function neteaseLoginPayload(extra = {}) {
 }
 
 async function refreshNeteaseProfile() {
-  if (!neteaseLoginSession.cookie) return neteaseLoginPayload();
+  if (!hasCookieName(neteaseLoginSession.cookie, 'MUSIC_U')) return neteaseLoginPayload();
   try {
     const { json, headers } = await fetchJsonWithMeta('https://music.163.com/api/nuser/account/get', {
       headers: neteaseHeaders(),
