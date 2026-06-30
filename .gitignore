@@ -1,0 +1,9 @@
+node_modules/
+.env
+.DS_Store
+Thumbs.db
+*.log
+.server.pid
+server.out.log
+server.err.log
+_upstream/

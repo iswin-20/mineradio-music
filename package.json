@@ -1,0 +1,13 @@
+{
+  "name": "mineradio-square",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A web music player that combines Mineradio-style playback with MusicSquare multi-source search.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
